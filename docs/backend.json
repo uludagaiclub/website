@@ -1,0 +1,137 @@
+
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Represents a user of the application, including their role.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique identifier for the user, matching Firebase Auth UID."
+        },
+        "email": {
+          "type": "string",
+          "description": "Email address of the user.",
+          "format": "email"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user."
+        },
+        "photoURL": {
+            "type": "string",
+            "description": "URL of the user's profile picture."
+        },
+        "role": {
+          "type": "string",
+          "description": "The role of the user within the application.",
+          "enum": ["student", "teacher"]
+        },
+         "classroom": {
+          "type": "string",
+          "description": "The classroom level of the student. This is optional and only applies to students.",
+          "enum": ["new-signup", "junior", "junior-plus", "mid", "mid-plus", "senior"]
+        },
+        "week1Score": { "type": "number", "description": "Score for week 1." },
+        "week2Score": { "type": "number", "description": "Score for week 2." },
+        "week3Score": { "type": "number", "description": "Score for week 3." },
+        "week4Score": { "type": "number", "description": "Score for week 4." },
+        "week5Score": { "type": "number", "description": "Score for week 5." },
+        "week6Score": { "type": "number", "description": "Score for week 6." },
+        "workshop1": { "type": "string", "description": "Status or notes for workshop 1." },
+        "workshop2": { "type": "string", "description": "Status or notes for workshop 2." },
+        "workshop3": { "type": "string", "description": "Status or notes for workshop 3." },
+        "workshop4": { "type": "string", "description": "Status or notes for workshop 4." }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Represents a general announcement for all users.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Title of the announcement." },
+        "content": { "type": "string", "description": "Main body of the announcement." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "The timestamp when the announcement was created." },
+        "authorName": { "type": "string", "description": "Name of the user who created the announcement." }
+      },
+      "required": ["title", "content", "createdAt", "authorName"]
+    },
+    "Assignment": {
+      "title": "Assignment",
+      "description": "Represents an assignment given to students.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "Title of the assignment." },
+        "description": { "type": "string", "description": "Detailed description of the assignment." },
+        "dueDate": { "type": "string", "format": "date-time", "description": "The due date for the assignment." },
+        "fileURL": { "type": "string", "description": "URL to an associated file for the assignment." },
+        "fileName": { "type": "string", "description": "Name of the associated file." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "The timestamp when the assignment was created." },
+        "classroomLevels": {
+          "type": "array",
+          "description": "The levels of the classrooms the assignment is for.",
+          "items": {
+            "type": "string",
+            "enum": ["junior", "junior-plus", "mid", "mid-plus", "senior"]
+          }
+        }
+      },
+      "required": ["title", "description", "dueDate", "createdAt", "classroomLevels"]
+    },
+    "Classroom": {
+      "title": "Classroom",
+      "description": "Represents a classroom category.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the classroom." },
+        "level": {
+          "type": "string",
+          "description": "The level of the classroom.",
+          "enum": ["junior", "junior-plus", "mid", "mid-plus", "senior"]
+        },
+        "description": { "type": "string", "description": "A description of the classroom." }
+      },
+      "required": ["name", "level"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Represents a single message in a chat.",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string", "description": "The content of the message." },
+        "authorName": { "type": "string", "description": "Display name of the sender." },
+        "authorId": { "type": "string", "description": "UID of the sender." },
+        "photoURL": { "type": "string", "description": "URL of the sender's profile picture." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Timestamp of when the message was sent." }
+      },
+      "required": ["text", "authorName", "authorId", "createdAt"]
+    }
+  },
+  "auth": {
+    "providers": ["google.com"]
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Stores user profiles. Authenticated users can read their own profile, teachers can read all profiles."
+    },
+    "/announcements": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Stores all announcements. Only teachers can write, all authenticated users can read."
+    },
+    "/assignments": {
+      "schema": { "$ref": "#/entities/Assignment" },
+      "description": "Stores all assignments. All authenticated users can read, only teachers can write."
+    },
+    "/classrooms/{classroomId}": {
+      "schema": { "$ref": "#/entities/Classroom" },
+      "description": "Stores classroom categories. Only teachers can create, read, update, and delete."
+    },
+    "/teacherChat": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Stores messages for the private teacher chat. Only teachers can read and write."
+    }
+  }
+}

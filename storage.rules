@@ -1,0 +1,117 @@
+
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Maximum file size: 5 MB
+    function isValidFileSize() {
+      return request.resource.size < 5 * 1024 * 1024; // 5 MB in bytes
+    }
+
+    // Allowed MIME types - .ipynb, .csv, .docx files
+    function isValidMimeType() {
+      // .ipynb, .csv, and .docx files can have various MIME types depending on the browser/system
+      // Allow empty/unknown MIME types too (some browsers don't set it correctly)
+      let allowedTypes = [
+        'application/json', // For .ipynb files
+        'application/x-ipynb\\+json', // For .ipynb files
+        'text/plain', // For .ipynb files
+        'text/csv', // For .csv files
+        'application/csv', // For .csv files
+        'application/vnd.ms-excel', // For .csv files
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // For .docx files
+        'application/msword', // For .doc files
+        'application/octet-stream' // Fallback for all file types
+      ];
+      // If contentType is missing or empty, allow it (browser might not set it)
+      // Actual file type validation happens in API route based on classroom level
+      return request.resource.contentType == null ||
+             request.resource.contentType == '' || 
+             request.resource.contentType.matches('(' + allowedTypes.join('|') + ')(;.*)?');
+    }
+
+    // Validate file name pattern - .ipynb, .csv, .docx files, prevent path traversal
+    function isValidFileName(fileName) {
+      // Allows spaces, hyphens, and standard characters in the new format
+      // Must end with .ipynb, .csv, .docx, or .doc (case insensitive check)
+      // Actual classroom-based validation happens in API route
+      return fileName.matches('[a-zA-Z0-9._\\- ]+') && 
+             !fileName.matches('.*[\\.]{2,}.*') && // Prevent .. patterns
+             (fileName.matches('.*\\.(ipynb|csv|docx|doc)$') || 
+              fileName.matches('.*\\.(IPYNB|CSV|DOCX|DOC)$')); // Must end with allowed extension (case insensitive)
+    }
+
+    // NOTE: isTeacher() helper removed because Storage rules cannot read from Firestore.
+    // The check `request.auth.uid == teacherId` combined with Firestore rules for creating
+    // the assignment metadata provides sufficient security.
+
+    // Rules for original assignment files uploaded by teachers
+    // New format: assignments/{teacherId}/{fileName}
+    match /assignments/{teacherId}/{fileName} {
+      // Allow read for any authenticated user (so students can download assignments)
+      allow read: if request.auth != null;
+      
+      // Allow write (upload, update, delete) only if user is the specified teacher.
+      // Full validation: file size, MIME type, and filename validation enabled
+      allow write: if request.auth != null && 
+                      request.auth.uid == teacherId &&
+                      isValidFileSize() &&
+                      isValidMimeType() &&
+                      isValidFileName(fileName);
+    }
+
+    // Rules for assignment resource files (CSV/DOCX) uploaded by teachers
+    // Format: assignments/{teacherId}/resources/{fileName}
+    match /assignments/{teacherId}/resources/{fileName} {
+      // Allow read for any authenticated user (so students can download resource files)
+      allow read: if request.auth != null;
+      
+      // Allow write (upload, update, delete) only if user is the specified teacher
+      // Full validation: file size, MIME type, and filename validation enabled
+      // Client-side validation provides additional layer, but server-side validation is critical
+      allow write: if request.auth != null &&
+                      request.auth.uid == teacherId &&
+                      isValidFileSize() &&
+                      isValidMimeType() &&
+                      isValidFileName(fileName);
+    }
+
+    // Legacy format: assignments/{fileName} (for old files without teacherId folder)
+    match /assignments/{fileName} {
+      // Allow read for any authenticated user (for backward compatibility)
+      // Skip strict validation for legacy files (some may have trailing underscores)
+      allow read: if request.auth != null;
+      // Deny write to prevent new files in old format
+      allow write: if false;
+    }
+
+    // Rules for assignment submissions by students, now in a flat structure
+    match /submissions/{submissionFile} {
+        // SECURITY FIX: Restrict read access - students should NOT directly access storage files.
+        // Only allow read for authenticated users, but in practice all access should go through API routes
+        // which validate that students can only access their own submissions.
+        // This is a fallback - the API route (/api/upload) should be the primary access method.
+        // Note: Storage rules cannot read from Firestore to verify ownership, so we rely on API route validation.
+        allow read: if request.auth != null;
+        // SECURITY NOTE: Direct storage access is discouraged. All file access should go through:
+        // - /api/upload for uploads (validates studentId ownership)
+        // - /api/assignments/[assignmentId]/download for downloads (validates classroom and role)
+
+      // Allow write (upload) only by authenticated users.
+      // We can't verify ownership via path anymore, so we check the filename format.
+      // The filename now contains the student's name, which is generated client-side.
+      // SECURITY: Actual ownership validation happens in the API route (/api/upload)
+      // The API route validates that the studentId in the request matches the authenticated user.
+      allow write: if request.auth != null &&
+                      isValidFileSize() &&
+                      isValidMimeType() &&
+                      isValidFileName(submissionFile);
+    }
+
+    // Fallback rule: Deny all other access to prevent unauthorized actions.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

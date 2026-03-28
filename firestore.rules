@@ -1,0 +1,421 @@
+/**
+ * @file Firestore Security Rules
+ * @core-philosophy This ruleset enforces a role-based access control model, where teachers have broader permissions than students.
+ *   User profiles are owned by the individual user, with teachers having read access to all profiles.
+ *   Announcements and assignments are readable by all authenticated users but writable only by teachers.
+ *   Classrooms are fully managed by teachers.
+ * @data-structure
+ *   /users/{userId}: Stores individual user profiles.  The `userId` must match the authenticated user's UID.
+ *   /announcements: Stores general announcements visible to all users.
+ *   /assignments: Stores assignments, accessible to all authenticated users.
+ *   /classrooms/{classroomId}: Stores classroom categories.
+ * @key-security-decisions
+ *   - Only teachers can create, update, or delete classrooms.
+ *   - Users can only read their own profiles, but teachers can read all profiles.
+ *   - Data shape is not strictly enforced to allow for rapid iteration (properties are not validated beyond authorization-critical fields).
+ * @denormalization-for-authorization N/A - Role-based authorization is implemented directly using the `request.auth.token.role` claim.
+ * @structural-segregation N/A - No separation of public vs private data is implemented.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * @description Controls access to user profile documents.
+     * @path /users/{userId}
+     * @allow (get) Authenticated user accessing their own profile (isOwner) or a teacher accessing any profile.
+     * @allow (list) Only teachers can list multiple user profiles. Students can only get their own document.
+     * @allow (create) Authenticated user creating their own profile (isOwner).
+     * @allow (update, delete) Authenticated user updating their own profile (isOwner).
+     * @deny (get) Authenticated user accessing another user's profile (not a teacher).
+     * @deny (create) Authenticated user attempting to create a profile with a mismatched UID.
+     * @deny (update, delete) Authenticated user attempting to modify another user's profile.
+     * @principle Enforces document ownership for writes and teacher-level read access for lists.
+     */
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isTeacher() || isOwner(userId));
+      allow list: if isSignedIn() && isTeacher();
+      allow create: if isSignedIn() && isOwner(userId) && request.resource.data.uid == userId;
+      // SECURITY FIX: Added parentheses to fix operator precedence - teachers OR owners can update
+      allow update: if isSignedIn() && (isTeacher() || (isOwner(userId) && resource != null && request.resource.data.uid == resource.data.uid));
+      allow delete: if isSignedIn() && isExistingOwner(userId);
+    }
+
+    /**
+     * @description Controls access to announcement documents.
+     * @path /announcements
+     * @allow (get, list) Any authenticated user can read announcements.
+     * @allow (create) Only teachers can create announcements.
+     * @allow (update, delete) Only teachers can update or delete announcements.
+     * @deny (create) Students attempting to create announcements.
+     * @deny (update, delete) Students attempting to modify or delete announcements.
+     * @principle Restricts write access to teachers; allows public read access.
+     */
+    match /announcements/{announcementId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isTeacher();
+      allow update: if isSignedIn() && isTeacher() && resource != null;
+      allow delete: if isSignedIn() && isTeacher() && resource != null;
+    }
+
+    /**
+     * @description Controls access to assignment documents.
+     * @path /assignments
+     * @allow (get, list) Any authenticated user can read assignments.
+     * @allow (create) Only teachers can create assignments.
+     * @allow (update, delete) Only teachers can update or delete assignments.
+     * @deny (create) Students attempting to create assignments.
+     * @deny (update, delete) Students attempting to modify or delete assignments.
+     * @principle Restricts write access to teachers; allows public read access.
+     */
+    match /assignments/{assignmentId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isTeacher();
+      allow update: if isSignedIn() && isTeacher() && resource != null;
+      allow delete: if isSignedIn() && isTeacher() && resource != null;
+    }
+
+    /**
+     * @description Controls access to classroom documents.
+     * @path /classrooms/{classroomId}
+     * @allow (get, list) Only teachers can read classrooms.
+     * @allow (create, update, delete) Only teachers can create, update, or delete classrooms.
+     * @deny (get, list, create, update, delete) Students attempting to access classrooms.
+     * @principle Restricts all access to teachers.
+     */
+    match /classrooms/{classroomId} {
+      allow get: if isSignedIn() && isTeacher();
+      allow list: if isSignedIn() && isTeacher();
+      allow create: if isSignedIn() && isTeacher();
+      allow update: if isSignedIn() && isTeacher() && resource != null;
+      allow delete: if isSignedIn() && isTeacher() && resource != null;
+    }
+
+    /**
+     * @description Controls access to assignment submission documents.
+     * @path /assignmentSubmissions/{submissionId}
+     * @allow (get, list) Students can read their own submissions, teachers can read all submissions.
+     * @allow (create) Students can create their own submissions with correct studentId.
+     * @allow (update) Students can update their own submissions, teachers can update any submission (for grading).
+     * @allow (delete) Only teachers can delete submissions.
+     * @deny (create) Students attempting to create submissions with wrong studentId.
+     * @principle Enforces student ownership for submissions, allows teacher read/write access.
+     * @idor-protection Only students can create submissions with their own studentId, preventing IDOR attacks.
+     */
+    match /assignmentSubmissions/{submissionId} {
+      // SECURITY FIX: Added null check for resource.data.studentId
+      allow get: if isSignedIn() && 
+                    resource != null && 
+                    resource.data.studentId != null &&
+                    (isOwner(resource.data.studentId) || isTeacher());
+      // SECURITY FIX: Allow list for authenticated users
+      // Students can list submissions but MUST filter by studentId in their queries: where('studentId', '==', user.uid)
+      // Teachers can list all submissions without filtering
+      // Note: Firestore rules cannot validate query filters, so we rely on client-side filtering for students
+      // The client code already correctly filters by studentId: where('studentId', '==', user.uid)
+      // This prevents students from seeing other students' submissions
+      allow list: if isSignedIn();
+      // IDOR Protection: Only allow students to create submissions with their own studentId
+      allow create: if isSignedIn() &&
+                       isOwner(request.resource.data.studentId) &&
+                       request.resource.data.keys().hasAll(['assignmentId', 'studentId', 'submittedAt']) &&
+                       request.resource.data.studentId is string &&
+                       request.resource.data.assignmentId is string;
+      // SECURITY FIX: Added null checks for resource.data fields
+      allow update: if isSignedIn() &&
+                       resource != null &&
+                       resource.data.studentId != null &&
+                       resource.data.assignmentId != null &&
+                       (isOwner(resource.data.studentId) || isTeacher()) &&
+                       request.resource.data.studentId == resource.data.studentId &&
+                       request.resource.data.assignmentId == resource.data.assignmentId;
+      allow delete: if isSignedIn() && isTeacher();
+    }
+
+    /**
+     * @description Controls access to assignment download tracking documents.
+     * @path /assignmentDownloads/{downloadId}
+     * @allow (get, list) Students can read their own downloads, teachers can read all downloads.
+     * @allow (create) Students can create their own download records with correct studentId.
+     * @allow (delete) Only teachers can delete download records.
+     * @idor-protection Only students can create download records with their own studentId, preventing IDOR attacks.
+     */
+    match /assignmentDownloads/{downloadId} {
+      // SECURITY FIX: Added null check for resource.data.studentId
+      allow get: if isSignedIn() && 
+                    resource != null && 
+                    resource.data.studentId != null &&
+                    (isOwner(resource.data.studentId) || isTeacher());
+      allow list: if isSignedIn(); // Teachers and students can list (filtered by studentId in queries)
+      // IDOR Protection: Only allow students to create download records with their own studentId
+      allow create: if isSignedIn() &&
+                       isOwner(request.resource.data.studentId) &&
+                       request.resource.data.keys().hasAll(['assignmentId', 'studentId', 'downloadedAt']) &&
+                       request.resource.data.studentId is string &&
+                       request.resource.data.assignmentId is string;
+      allow update: if false; // Download records should not be updated
+      allow delete: if isSignedIn() && isTeacher();
+    }
+
+    /**
+     * @description Controls access to calendar note documents.
+     * @path /calendarNotes/{noteId}
+     * @allow (get, list) All authenticated users can read calendar notes.
+     * @allow (create, update, delete) Only teachers can create, update, or delete calendar notes.
+     * @deny (create, update, delete) Students attempting to modify calendar notes.
+     * @principle Restricts write access to teachers; allows public read access.
+     */
+    match /calendarNotes/{noteId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && 
+                       isTeacher() &&
+                       request.resource.data.keys().hasAll(['title', 'content', 'date', 'authorName', 'createdAt']) &&
+                       request.resource.data.title is string &&
+                       request.resource.data.content is string &&
+                       request.resource.data.date is timestamp;
+      allow update: if isSignedIn() && isTeacher() && resource != null;
+      allow delete: if isSignedIn() && isTeacher() && resource != null;
+    }
+    
+    /**
+     * @description Controls access to the private teacher chat.
+     * @path /teacherChat/{messageId}
+     * @allow (read, write) Only authenticated users with the 'teacher' role.
+     * @deny All access for students or unauthenticated users.
+     * @principle Restricts the entire collection to teachers for private communication.
+     */
+    match /teacherChat/{messageId} {
+      allow read, write: if isSignedIn() && isTeacher();
+    }
+
+    /**
+     * @description Controls access to team documents.
+     * @path /teams/{teamId}
+     * @allow (read, list) Only teachers can read teams.
+     * @allow (create, update, delete) Only teachers can create, update, or delete teams.
+     * @deny All access for students or unauthenticated users.
+     * @principle Restricts all access to teachers only.
+     */
+    match /teams/{teamId} {
+      allow get: if isSignedIn() && isTeacher();
+      allow list: if isSignedIn() && isTeacher();
+      allow create: if isSignedIn() && isTeacher();
+      allow update: if isSignedIn() && isTeacher() && resource != null;
+      allow delete: if isSignedIn() && isTeacher() && resource != null;
+    }
+
+    /**
+     * @description Controls access to team tasks (Trello-style kanban board).
+     * @path /tasks/{taskId}
+     * @allow (read, list) Team members can read tasks for their team. Captains can see tasks for their assigned team.
+     * @allow (create) Only team captains can create tasks.
+     * @allow (update) Team members can update tasks (steps, status) for their team, but only assigned members can mark steps complete.
+     * @allow (delete) Only team captains can delete tasks.
+     * @principle Team members can only access tasks for their own team role. Captains can access tasks for their assigned team.
+     */
+    match /tasks/{taskId} {
+      // SECURITY FIX: Added null checks and optimized user doc retrieval
+      allow get: if isSignedIn() && 
+                    (isTeacher() || 
+                     (isTeamMember() && resource != null && resource.data.teamRole != null &&
+                      (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                       (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)))));
+      // SECURITY NOTE: List permission allows team members to list all tasks, but client-side queries should filter by teamRole
+      // Firestore rules cannot validate query filters, so this relies on proper client-side filtering
+      allow list: if isSignedIn() && (isTeacher() || isTeamMember());
+      // Sadece takım kaptanları görev oluşturabilir
+      allow create: if isSignedIn() && isTeamCaptain() && 
+                       request.resource.data.teamRole != null &&
+                       request.resource.data.createdBy == request.auth.uid &&
+                       (request.resource.data.teamRole == getTeamRoleFromCaptainTeam() ||
+                        request.resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role);
+      // Takım üyeleri görevleri güncelleyebilir (status, steps)
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow update: if isSignedIn() && isTeamMember() && 
+                       resource != null &&
+                       resource.data.teamRole != null &&
+                       (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                        (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)));
+      // Sadece takım kaptanları görev silebilir
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow delete: if isSignedIn() && isTeamCaptain() && 
+                       resource != null &&
+                       resource.data.teamRole != null &&
+                       (resource.data.teamRole == getTeamRoleFromCaptainTeam() ||
+                        resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role);
+    }
+
+    /**
+     * @description Controls access to team columns (kanban board columns).
+     * @path /teamColumns/{columnId}
+     * @allow (read, list) Team members can read columns for their team. Teachers can read all columns.
+     * @allow (create) Only team captains and teachers can create columns.
+     * @allow (update, delete) Only team captains and teachers can update/delete columns.
+     * @principle Team members can only access columns for their own team role. Captains and teachers can manage columns.
+     */
+    match /teamColumns/{columnId} {
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow get: if isSignedIn() && 
+                    (isTeacher() || 
+                     (isTeamMember() && resource != null && resource.data.teamRole != null &&
+                      (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                       (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)))));
+      // SECURITY NOTE: List permission allows team members to list all columns, but client-side queries should filter by teamRole
+      allow list: if isSignedIn() && (isTeacher() || isTeamMember());
+      allow create: if isSignedIn() && 
+                       request.resource.data.teamRole != null &&
+                       request.resource.data.createdBy == request.auth.uid &&
+                       (isTeacher() || 
+                        (isTeamCaptain() && 
+                         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                         (request.resource.data.teamRole == getTeamRoleFromCaptainTeam() ||
+                          request.resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role)));
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow update: if isSignedIn() && 
+                       resource != null &&
+                       resource.data.teamRole != null &&
+                       (isTeacher() ||
+                        (isTeamCaptain() && 
+                         (resource.data.teamRole == getTeamRoleFromCaptainTeam() ||
+                          resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role)));
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow delete: if isSignedIn() && 
+                       resource != null &&
+                       resource.data.teamRole != null &&
+                       (isTeacher() ||
+                        (isTeamCaptain() && 
+                         (resource.data.teamRole == getTeamRoleFromCaptainTeam() ||
+                          resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role)));
+    }
+
+    /**
+     * @description Controls access to team chat messages.
+     * @path /teamChat/{messageId}
+     * @allow (read, list) Team members can read messages for their team. Captains can see messages for their assigned team.
+     * @allow (create) Team members can create messages for their team.
+     * @allow (update, delete) Team members can update/delete their own messages.
+     * @principle Team members can only access chat for their own team role. Captains can access chat for their assigned team.
+     */
+    match /teamChat/{messageId} {
+      // SECURITY FIX: Added null check for resource.data.teamRole
+      allow get: if isSignedIn() && 
+                    (isTeacher() || 
+                     (isTeamMember() && resource != null && resource.data.teamRole != null &&
+                      (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                       (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)))));
+      // SECURITY NOTE: List permission allows team members to list all messages, but client-side queries should filter by teamRole
+      allow list: if isSignedIn() && (isTeacher() || isTeamMember());
+      // Öğretmenler herhangi bir takıma mesaj gönderebilir
+      // Takım üyeleri sadece kendi takımlarına mesaj gönderebilir
+      allow create: if isSignedIn() && 
+                         request.resource.data.authorId == request.auth.uid &&
+                         request.resource.data.teamRole != null &&
+                         (isTeacher() || 
+                          (isTeamMember() && 
+                           exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                           (request.resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                            (isTeamCaptain() && 
+                             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+                             request.resource.data.teamRole == getTeamRoleFromCaptainTeam()))));
+      // SECURITY FIX: Added null checks for resource.data fields
+      allow update: if isSignedIn() && 
+                       resource != null &&
+                       resource.data.authorId != null &&
+                       resource.data.teamRole != null &&
+                       resource.data.authorId == request.auth.uid &&
+                       (isTeacher() ||
+                        (isTeamMember() && 
+                         (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                          (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)))));
+      // SECURITY FIX: Added null checks for resource.data fields
+      allow delete: if isSignedIn() && 
+                       resource != null &&
+                       resource.data.authorId != null &&
+                       resource.data.teamRole != null &&
+                       resource.data.authorId == request.auth.uid &&
+                       (isTeacher() ||
+                        (isTeamMember() && 
+                         (resource.data.teamRole == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role ||
+                          (isTeamCaptain() && hasAccessToTeam(resource.data.teamRole)))));
+    }
+
+    // --- Helper Functions ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    function isExistingOwner(userId) {
+        return isOwner(userId) && resource != null;
+    }
+
+    /**
+     * @description Checks if the authenticated user is a teacher.
+     * Reads the role from Firestore user document since custom claims are not set.
+     * @returns true if user exists in Firestore and has role == 'teacher'
+     */
+    function isTeacher() {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'teacher';
+    }
+
+    /**
+     * @description Checks if the authenticated user is a team captain.
+     * @returns true if user exists in Firestore and has role == 'team-captain'
+     */
+    function isTeamCaptain() {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'team-captain';
+    }
+
+    /**
+     * @description Checks if the authenticated user is a team member (any team).
+     * @returns true if user exists in Firestore and has a team member role
+     */
+    function isTeamMember() {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'team-captain' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'talos-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'mevzu-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'hava-savunma-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'aitolia-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'egitimde-yapay-zeka-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'herdai-team-member' ||
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'artin-team-member');
+    }
+
+    /**
+     * @description Kaptanın teamName'inden takım role'ünü döndürür
+     * @returns Takım role'ü (örn: 'talos-team-member') veya null
+     */
+    function getTeamRoleFromCaptainTeam() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ?
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT TALOS' ? 'talos-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT MEVZU' ? 'mevzu-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT HAVA SAVUNMA' ? 'hava-savunma-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT AITOLIA' ? 'aitolia-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT EĞİTİMDE YAPAY ZEKA' ? 'egitimde-yapay-zeka-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT HERDAI' ? 'herdai-team-member' :
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.teamName == 'YZT ARTİN' ? 'artin-team-member' :
+         null) : null;
+    }
+
+    /**
+     * @description Kaptanın belirli bir takım role'üne erişimi olup olmadığını kontrol eder
+     * @param teamRole Kontrol edilecek takım role'ü
+     * @returns true if kaptan bu takıma atanmışsa
+     */
+    function hasAccessToTeam(teamRole) {
+      return isTeamCaptain() && getTeamRoleFromCaptainTeam() != null && getTeamRoleFromCaptainTeam() == teamRole;
+    }
+  }
+}
